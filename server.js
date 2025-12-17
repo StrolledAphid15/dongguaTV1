@@ -158,7 +158,91 @@ app.get('/api/sites', async (req, res) => {
     res.json(sitesData);
 });
 
-// 2. 搜索 API (带缓存)
+// 2. 搜索 API - SSE 流式版本 (GET, 用于实时搜索)
+app.get('/api/search', async (req, res) => {
+    const keyword = req.query.wd;
+    const stream = req.query.stream === 'true';
+
+    if (!keyword) {
+        return res.status(400).json({ error: 'Missing keyword' });
+    }
+
+    const sites = getDB().sites;
+
+    if (!stream) {
+        // 非流式模式：返回普通 JSON
+        return res.json({ error: 'Use stream=true for GET requests' });
+    }
+
+    // SSE 流式模式
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // 禁用 Nginx 缓冲
+
+    // 并行搜索所有站点
+    const searchPromises = sites.map(async (site) => {
+        const cacheKey = `${site.key}_${keyword}`;
+        const cached = cacheManager.get('search', cacheKey);
+
+        if (cached && cached.list) {
+            // 命中缓存，立即发送
+            const items = cached.list.map(item => ({
+                ...item,
+                site_key: site.key,
+                site_name: site.name
+            }));
+            if (items.length > 0) {
+                res.write(`data: ${JSON.stringify(items)}\n\n`);
+            }
+            return items;
+        }
+
+        try {
+            console.log(`[SSE Search] ${site.name} -> ${keyword}`);
+            const response = await axios.get(site.api, {
+                params: { ac: 'detail', wd: keyword },
+                timeout: 8000
+            });
+
+            const data = response.data;
+            const list = data.list ? data.list.map(item => ({
+                vod_id: item.vod_id,
+                vod_name: item.vod_name,
+                vod_pic: item.vod_pic,
+                vod_remarks: item.vod_remarks,
+                vod_year: item.vod_year,
+                type_name: item.type_name,
+                vod_content: item.vod_content,
+                vod_play_from: item.vod_play_from,
+                vod_play_url: item.vod_play_url,
+                site_key: site.key,
+                site_name: site.name
+            })) : [];
+
+            // 缓存结果
+            cacheManager.set('search', cacheKey, { list }, 600);
+
+            // 发送结果到客户端
+            if (list.length > 0) {
+                res.write(`data: ${JSON.stringify(list)}\n\n`);
+            }
+            return list;
+        } catch (error) {
+            console.error(`[SSE Search Error] ${site.name}:`, error.message);
+            return [];
+        }
+    });
+
+    // 等待所有搜索完成
+    await Promise.all(searchPromises);
+
+    // 发送完成事件
+    res.write('event: done\ndata: {}\n\n');
+    res.end();
+});
+
+// 2b. 搜索 API - POST 版本 (用于单站点搜索)
 app.post('/api/search', async (req, res) => {
     const { keyword, siteKey } = req.body;
     const sites = getDB().sites;
@@ -201,7 +285,46 @@ app.post('/api/search', async (req, res) => {
     }
 });
 
-// 3. 详情 API (带缓存)
+// 3. 详情 API (带缓存) - GET 版本
+app.get('/api/detail', async (req, res) => {
+    const id = req.query.id;
+    const siteKey = req.query.site_key;
+    const sites = getDB().sites;
+    const site = sites.find(s => s.key === siteKey);
+
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+
+    const cacheKey = `${siteKey}_detail_${id}`;
+    const cached = cacheManager.get('detail', cacheKey);
+    if (cached) {
+        console.log(`[Cache] Hit detail: ${cacheKey}`);
+        // 返回格式：{ list: [detail] }，与前端期望一致
+        return res.json({ list: [cached] });
+    }
+
+    try {
+        console.log(`[Detail] ${site.name} -> ID: ${id}`);
+        const response = await axios.get(site.api, {
+            params: { ac: 'detail', ids: id },
+            timeout: 8000
+        });
+
+        const data = response.data;
+        if (data.list && data.list.length > 0) {
+            const detail = data.list[0];
+            cacheManager.set('detail', cacheKey, detail, 3600); // 缓存1小时
+            // 返回格式：{ list: [detail] }，与前端期望一致
+            res.json({ list: [detail] });
+        } else {
+            res.status(404).json({ error: 'Not found', list: [] });
+        }
+    } catch (error) {
+        console.error(`[Detail Error] ${site.name}:`, error.message);
+        res.status(500).json({ error: 'Detail fetch failed', list: [] });
+    }
+});
+
+// 3b. 详情 API (带缓存) - POST 版本
 app.post('/api/detail', async (req, res) => {
     const { id, siteKey } = req.body;
     const sites = getDB().sites;
