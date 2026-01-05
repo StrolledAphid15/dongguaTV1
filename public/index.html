@@ -199,6 +199,39 @@
             }
         }
 
+        /* 📺 TV 遥控器焦点导航样式 */
+        /* 让所有可交互元素在获得焦点时显示高亮边框 */
+        .close-btn:focus,
+        .btn-cast:focus,
+        .source-pill:focus,
+        .ep-item:focus,
+        .card:focus,
+        .info-modal-close:focus,
+        button:focus,
+        a:focus,
+        [tabindex]:focus {
+            outline: 3px solid #e50914 !important;
+            outline-offset: 2px !important;
+            box-shadow: 0 0 0 6px rgba(229, 9, 20, 0.3) !important;
+        }
+
+        /* 播放器控制按钮焦点样式 */
+        .dplayer-icon:focus {
+            outline: 2px solid #fff !important;
+            outline-offset: 2px !important;
+            background: rgba(255, 255, 255, 0.2) !important;
+            border-radius: 4px !important;
+        }
+
+        /* 确保所有可点击元素可以获得焦点 */
+        .source-pill,
+        .ep-item,
+        .close-btn,
+        .btn-cast,
+        .card {
+            cursor: pointer;
+        }
+
         /* 📱 全屏播放模式：移除状态栏 padding，让视频占满全屏 */
         body.dplayer-fullscreen-active {
             padding-top: 0 !important;
@@ -2925,7 +2958,8 @@
 
         <!-- ★★★ 播放详情页 (影院布局) ★★★ -->
         <div class="detail-overlay" :class="{ active: showDetail }">
-            <div class="close-btn" @click="closeDetail"><i class="fas fa-times"></i></div>
+            <div class="close-btn" tabindex="1" @click="closeDetail" @keydown.enter="closeDetail"><i
+                    class="fas fa-times"></i></div>
 
             <div class="player-layout" v-if="currentGroup">
 
@@ -2937,7 +2971,7 @@
                             正在播放: <span class="text-white fw-bold">{{ currentSource?.site_name }}</span>
                         </div>
                     </div>
-                    <button class="btn-cast" @click="castVideo">
+                    <button class="btn-cast" tabindex="2" @click="castVideo">
                         <i class="fas fa-tv"></i> 一键投屏
                     </button>
                 </div>
@@ -3000,9 +3034,9 @@
                         <!-- 快速线路列表 (< 600ms) -->
                         <div class="source-list" v-if="fastSources.length > 0 || slowSources.length > 0">
                             <!-- 快速线路 -->
-                            <div v-for="source in fastSources" class="source-pill"
-                                :class="{ active: currentSource?.site_key === source.site_key }"
-                                @click="switchSource(source)">
+                            <div v-for="(source, index) in fastSources" class="source-pill"
+                                :class="{ active: currentSource?.site_key === source.site_key }" :tabindex="10 + index"
+                                @click="switchSource(source)" @keydown.enter="switchSource(source)">
                                 <span>{{ source.site_name }}</span>
                                 <span class="latency-dot" :class="getLatencyClass(source.latency)"></span>
                                 <span style="font-size:10px; opacity:0.6;">{{source.latency}}ms</span>
@@ -3025,9 +3059,10 @@
                                 <i class="fas fa-hourglass-half"></i> 较慢线路 ({{ slowSources.length }})
                             </div>
                             <!-- 慢速线路 -->
-                            <div v-for="source in slowSources" class="source-pill"
+                            <div v-for="(source, index) in slowSources" class="source-pill"
                                 :class="{ active: currentSource?.site_key === source.site_key }" style="opacity: 0.7;"
-                                @click="switchSource(source)">
+                                :tabindex="100 + index" @click="switchSource(source)"
+                                @keydown.enter="switchSource(source)">
                                 <span>{{ source.site_name }}</span>
                                 <span class="latency-dot" :class="getLatencyClass(source.latency)"></span>
                                 <span style="font-size:10px; opacity:0.6;">{{source.latency}}ms</span>
@@ -3403,6 +3438,53 @@
                         if (!menu.contains(e.target)) {
                             menu.classList.remove('dplayer-menu-show');
                         }
+                    }
+                });
+
+                // 📺 TV 遥控器键盘控制
+                document.addEventListener('keydown', (e) => {
+                    // 只在播放页面生效
+                    if (!this.showDetail || !this.dp) return;
+
+                    const video = this.dp.video;
+                    if (!video) return;
+
+                    switch (e.key) {
+                        case ' ':        // 空格键
+                        case 'Enter':    // 确认键（部分遥控器）
+                            // 如果焦点不在按钮上，则控制播放
+                            if (!e.target.matches('button, .source-pill, .close-btn, .btn-cast, [tabindex]')) {
+                                e.preventDefault();
+                                this.dp.toggle();
+                            }
+                            break;
+                        case 'ArrowLeft':  // 左键：快退 10 秒
+                            e.preventDefault();
+                            video.currentTime = Math.max(0, video.currentTime - 10);
+                            this.dp.notice('快退 10 秒');
+                            break;
+                        case 'ArrowRight': // 右键：快进 10 秒
+                            e.preventDefault();
+                            video.currentTime = Math.min(video.duration, video.currentTime + 10);
+                            this.dp.notice('快进 10 秒');
+                            break;
+                        case 'ArrowUp':    // 上键：增加音量
+                            e.preventDefault();
+                            video.volume = Math.min(1, video.volume + 0.1);
+                            this.dp.notice('音量: ' + Math.round(video.volume * 100) + '%');
+                            break;
+                        case 'ArrowDown':  // 下键：降低音量
+                            e.preventDefault();
+                            video.volume = Math.max(0, video.volume - 0.1);
+                            this.dp.notice('音量: ' + Math.round(video.volume * 100) + '%');
+                            break;
+                        case 'Escape':     // 返回键
+                        case 'Backspace':  // 某些遥控器的返回键
+                            if (this.showDetail) {
+                                e.preventDefault();
+                                this.closeDetail();
+                            }
+                            break;
                     }
                 });
 
