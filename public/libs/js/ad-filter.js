@@ -269,14 +269,27 @@
         const groupDurations = {};
         let maxDuration = 0;
         let mainContentGroup = 0;
+        let totalDuration = 0;
 
         for (const gKey of groupKeys) {
             const duration = groups[gKey].reduce((sum, s) => sum + s.duration, 0);
             groupDurations[gKey] = duration;
+            totalDuration += duration;
             if (duration > maxDuration) {
                 maxDuration = duration;
                 mainContentGroup = gKey;
             }
+        }
+
+        // 详细日志：输出所有 discontinuity 组的信息（用于调试 1080 资源站）
+        log(`📊 M3U8 分析详情: ${groupKeys.length} 个组, 主内容组=#${mainContentGroup} (${maxDuration.toFixed(1)}秒)`);
+        for (const gKey of groupKeys) {
+            const group = groups[gKey];
+            const groupDuration = groupDurations[gKey];
+            const isMain = gKey === mainContentGroup;
+            const sampleUrl = group[0]?.url || '';
+            const domain = sampleUrl.match(/https?:\/\/([^\/]+)/)?.[1] || 'unknown';
+            log(`  组 #${gKey}: ${group.length} 分段, ${groupDuration.toFixed(1)}秒, 域名=${domain}${isMain ? ' [主内容]' : ''}`);
         }
 
         // 分析每个组
@@ -304,14 +317,26 @@
             for (let i = 0; i < groupKeys.indexOf(gKey); i++) {
                 positionBefore += groupDurations[groupKeys[i]];
             }
+            const positionPercent = totalDuration > 0 ? (positionBefore / totalDuration * 100) : 0;
 
             // 如果是视频开头的短分段组，很可能是广告
             const isAtStart = positionBefore < 10;  // 开头10秒内
-            const isAtEnd = positionBefore > (maxDuration * 0.9);  // 结尾10%
+            const isAtEnd = positionPercent > 90;   // 结尾10%
 
-            // 判断条件：满足时长条件 + 分段数条件 + （开头或结尾位置或相对主内容很短）
-            if (isAdByDuration && isAdBySegmentCount && (isAtStart || isAtEnd || isAdByRatio)) {
-                log(`检测到广告组 #${gKey}: ${group.length} 分段, ${groupDuration.toFixed(1)}秒, 位置: ${positionBefore.toFixed(0)}秒`);
+            // 新增：中间位置广告检测（针对 1080 资源站等中插广告）
+            // 策略：只要不是主内容组，且时长在广告范围内，就认为是广告
+            // 理由：正常 M3U8 不会有多个 discontinuity 分组，如果有，非主内容的短分组大概率是广告
+            const isMidAd = isAdByDuration && isAdBySegmentCount && (groupDuration / totalDuration) < 0.1;
+
+            // 调试日志
+            log(`  💡 组 #${gKey} 分析: 时长${groupDuration.toFixed(1)}秒, 位置${positionBefore.toFixed(0)}秒(${positionPercent.toFixed(0)}%), ` +
+                `符合时长=${isAdByDuration}, 符合分段数=${isAdBySegmentCount}, 符合比例=${isAdByRatio}, ` +
+                `开头=${isAtStart}, 结尾=${isAtEnd}, 中插广告=${isMidAd}`);
+
+            // 判断条件：满足广告时长范围 + 分段数条件，直接过滤
+            // 因为正常视频不会出现多个 discontinuity 分组，非主内容的分组就是广告
+            if (isAdByDuration && isAdBySegmentCount) {
+                log(`🎯 检测到广告组 #${gKey}: ${group.length} 分段, ${groupDuration.toFixed(1)}秒, 位置: ${positionBefore.toFixed(0)}秒`);
                 group.forEach(seg => adSegmentIndices.add(seg.index));
             }
         }
@@ -531,54 +556,141 @@
     }
 
     /**
+     * 注入广告过滤开关到设置面板 (可从外部调用)
+     * @returns {boolean} 是否成功注入
+     */
+    function injectAdFilterUI() {
+        const settingPanel = document.querySelector('.dplayer-setting-origin-panel');
+        if (!settingPanel) return false;
+
+        // 如果已经存在，不重复注入
+        if (settingPanel.querySelector('.dplayer-setting-ad-filter')) {
+            return true;
+        }
+
+        const html = `
+            <div class="dplayer-setting-ad-filter" style="border-top: 1px solid rgba(255,255,255,0.1); margin-top: 5px; padding-top: 5px;">
+                <div class="dplayer-setting-item" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;" id="ad-filter-toggle">
+                    <span class="dplayer-label">广告过滤</span>
+                    <div style="position: relative; width: 40px; height: 22px; background: ${AD_FILTER_CONFIG.enabled ? '#e50914' : 'rgba(255,255,255,0.2)'}; border-radius: 20px; transition: background 0.3s;">
+                        <div class="ad-filter-knob" style="position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: #fff; border-radius: 50%; transition: transform 0.3s; transform: translateX(${AD_FILTER_CONFIG.enabled ? '18px' : '0'});"></div>
+                    </div>
+                </div>
+            </div>
+        `;
+        settingPanel.insertAdjacentHTML('beforeend', html);
+
+        // 绑定点击事件
+        const toggle = settingPanel.querySelector('#ad-filter-toggle');
+        if (toggle) {
+            toggle.addEventListener('click', () => {
+                AD_FILTER_CONFIG.enabled = !AD_FILTER_CONFIG.enabled;
+                const bg = toggle.querySelector('div');
+                const knob = toggle.querySelector('.ad-filter-knob');
+                if (bg && knob) {
+                    bg.style.background = AD_FILTER_CONFIG.enabled ? '#e50914' : 'rgba(255,255,255,0.2)';
+                    knob.style.transform = `translateX(${AD_FILTER_CONFIG.enabled ? '18px' : '0'})`;
+                }
+                if (window.dp && window.dp.notice) {
+                    window.dp.notice(AD_FILTER_CONFIG.enabled ? '🛡️ 广告过滤已开启' : '广告过滤已关闭');
+                }
+                // 保存设置
+                try {
+                    localStorage.setItem('donggua_ad_filter_enabled', AD_FILTER_CONFIG.enabled);
+                } catch (e) { }
+            });
+        }
+
+        log('✅ 广告过滤开关已注入到设置面板');
+        return true;
+    }
+
+    /**
      * 创建广告过滤设置 UI
+     * 使用多种策略确保按钮能正确注入到设置面板
      */
     function createSettingsUI() {
-        // 将在 DPlayer 设置菜单中添加广告过滤选项
-        const checkPlayer = setInterval(() => {
-            if (window.dp) {
-                clearInterval(checkPlayer);
+        // 策略1: 监听设置图标点击
+        function setupSettingIconListener() {
+            // 使用事件委托，监听整个 document 的点击
+            document.addEventListener('click', (e) => {
+                // 检查是否点击了设置图标
+                const settingIcon = e.target.closest('.dplayer-setting-icon');
+                if (settingIcon) {
+                    // 延迟执行，等待 DPlayer 创建设置面板
+                    setTimeout(injectAdFilterUI, 50);
+                    setTimeout(injectAdFilterUI, 150);
+                    setTimeout(injectAdFilterUI, 300);
+                }
+            }, true);
+        }
 
-                // 等待设置面板创建
-                setTimeout(() => {
-                    const settingPanel = document.querySelector('.dplayer-setting-origin-panel');
-                    if (settingPanel && !settingPanel.querySelector('.dplayer-setting-ad-filter')) {
-                        const html = `
-                            <div class="dplayer-setting-ad-filter" style="border-top: 1px solid rgba(255,255,255,0.1); margin-top: 5px; padding-top: 5px;">
-                                <div class="dplayer-setting-item" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;" id="ad-filter-toggle">
-                                    <span class="dplayer-label">🛡️ 广告过滤</span>
-                                    <div style="position: relative; width: 40px; height: 22px; background: ${AD_FILTER_CONFIG.enabled ? '#e50914' : 'rgba(255,255,255,0.2)'}; border-radius: 20px; transition: background 0.3s;">
-                                        <div class="ad-filter-knob" style="position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: #fff; border-radius: 50%; transition: transform 0.3s; transform: translateX(${AD_FILTER_CONFIG.enabled ? '18px' : '0'});"></div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                        settingPanel.insertAdjacentHTML('beforeend', html);
-
-                        // 绑定点击事件
-                        const toggle = settingPanel.querySelector('#ad-filter-toggle');
-                        if (toggle) {
-                            toggle.addEventListener('click', () => {
-                                AD_FILTER_CONFIG.enabled = !AD_FILTER_CONFIG.enabled;
-                                const bg = toggle.querySelector('div');
-                                const knob = toggle.querySelector('.ad-filter-knob');
-                                if (bg && knob) {
-                                    bg.style.background = AD_FILTER_CONFIG.enabled ? '#e50914' : 'rgba(255,255,255,0.2)';
-                                    knob.style.transform = `translateX(${AD_FILTER_CONFIG.enabled ? '18px' : '0'})`;
+        // 策略2: 使用 MutationObserver 监听整个 document.body
+        function setupMutationObserver() {
+            const observer = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    if (mutation.addedNodes.length > 0) {
+                        // 检查是否有设置面板被添加
+                        for (const node of mutation.addedNodes) {
+                            if (node.nodeType === Node.ELEMENT_NODE) {
+                                if (node.classList && node.classList.contains('dplayer-setting-origin-panel')) {
+                                    setTimeout(injectAdFilterUI, 10);
+                                } else if (node.querySelector && node.querySelector('.dplayer-setting-origin-panel')) {
+                                    setTimeout(injectAdFilterUI, 10);
                                 }
-                                if (window.dp && window.dp.notice) {
-                                    window.dp.notice(AD_FILTER_CONFIG.enabled ? '🛡️ 广告过滤已开启' : '广告过滤已关闭');
-                                }
-                                // 保存设置
-                                try {
-                                    localStorage.setItem('donggua_ad_filter_enabled', AD_FILTER_CONFIG.enabled);
-                                } catch (e) { }
-                            });
+                            }
                         }
                     }
-                }, 1000);
-            }
-        }, 500);
+                }
+            });
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+
+            // 10分钟后停止观察（防止内存泄漏）
+            setTimeout(() => {
+                observer.disconnect();
+            }, 600000);
+        }
+
+        // 策略3: 定时检查（作为后备方案）
+        function setupPeriodicCheck() {
+            let attempts = 0;
+            const maxAttempts = 60; // 最多检查30秒
+
+            const checkInterval = setInterval(() => {
+                attempts++;
+                if (injectAdFilterUI() || attempts >= maxAttempts) {
+                    clearInterval(checkInterval);
+                }
+            }, 500);
+        }
+
+        // 初始化所有策略
+        function init() {
+            // 尝试立即注入
+            injectAdFilterUI();
+
+            // 设置点击监听
+            setupSettingIconListener();
+
+            // 设置 DOM 变更监听
+            setupMutationObserver();
+
+            // 设置后备定时检查
+            setupPeriodicCheck();
+
+            log('✅ 广告过滤 UI 监听已启动');
+        }
+
+        // 等待 DOM 准备就绪后初始化
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
     }
 
     /**
@@ -616,7 +728,9 @@
         setSkipFirstSeconds: (seconds) => {
             AD_FILTER_CONFIG.skipFirstSegments = seconds > 0;
             AD_FILTER_CONFIG.firstSegmentSkipDuration = seconds;
-        }
+        },
+        // 导出 initUI 供外部调用 (如 index.html 中的设置菜单监听)
+        initUI: injectAdFilterUI
     };
 
     // 初始化
